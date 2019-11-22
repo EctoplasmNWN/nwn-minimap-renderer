@@ -1,0 +1,9 @@
+[submodule "external/NWNFileFormats"]
+	path = external/NWNFileFormats
+	url = https://github.com/EctoplasmNWN/NWNFileFormats.git
+[submodule "external/TGA"]
+	path = external/TGA
+	url = https://github.com/ColumbusUtrigas/TGA.git
+[submodule "external/lodepng"]
+	path = external/lodepng
+	url = https://github.com/lvandeve/lodepng.git
