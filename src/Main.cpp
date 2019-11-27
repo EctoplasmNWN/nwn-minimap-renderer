@@ -22,7 +22,6 @@ struct AreaTile
 struct Area
 {
     std::string name;
-    std::string resref;
     int width;
     int height;
     std::string tileset;
@@ -37,8 +36,8 @@ struct Tga
 
     Tga(Tga&& other) { *this = std::move(other); }
     Tga& operator=(Tga&& other)
-    { 
-        data = other.data; 
+    {
+        data = other.data;
         width = other.width;
         height = other.height;
         bpp = other.bpp;
@@ -67,6 +66,20 @@ struct Tileset
     std::unordered_map<int, TilesetTile> tiles;
 };
 
+struct Transition
+{
+    std::string src_area;
+    std::string dst_tag;
+};
+
+struct PossibleTransitionDestination
+{
+    std::string area;
+    float x;
+    float y;
+    float z;
+};
+
 Tileset load_tileset(const OwningDataBlock& data)
 {
     Tileset tileset;
@@ -74,7 +87,7 @@ Tileset load_tileset(const OwningDataBlock& data)
     // Format is basically an INI. We care about [TILEx] ImageMap2D.
     const char* head = (const char*) data.GetData();
 
-    static auto copy_til_newline = [](char* out, const char* head)
+    auto copy_til_newline = [](char* out, const char* head)
     {
         for (int i = 0; ; ++i)
         {
@@ -195,6 +208,9 @@ int main(int argc, char** argv)
 
     std::unordered_map<std::string, Area> areas;
     std::unordered_map<std::string, Tileset> tilesets;
+    std::vector<Transition> transitions;
+    std::unordered_map<std::string, PossibleTransitionDestination> transitions_dest_door;
+    std::unordered_map<std::string, PossibleTransitionDestination> transitions_dest_wp;
     std::unordered_map<std::string, OwningDataBlock> tileset_markup = load_data(path_key, path_game_dir,
         [](const Key::Friendly::KeyBifReferencedResource& res) { return res.m_ResType == Resource::ResourceType::SET; });
 
@@ -212,11 +228,11 @@ int main(int argc, char** argv)
 
         tilesets[kvp.first] = std::move(tileset);
     }
-    
+
     // Load them.
-    std::unordered_map<std::string, OwningDataBlock> tileset_icons = load_data(path_key, path_game_dir, 
+    std::unordered_map<std::string, OwningDataBlock> tileset_icons = load_data(path_key, path_game_dir,
         [&tga_files_to_load](const Key::Friendly::KeyBifReferencedResource& res)
-        { 
+        {
             return res.m_ResType == Resource::ResourceType::TGA && tga_files_to_load.contains(res.m_ResRef);
         });
 
@@ -234,7 +250,6 @@ int main(int argc, char** argv)
                 ASSERT(iter != std::end(tileset_icons));
             }
 
-            int width, height, bpp;
             tile_kvp.second.tga = Tga((uint8_t*)iter->second.GetData(), iter->second.GetDataLength());
         }
     }
@@ -260,24 +275,22 @@ int main(int argc, char** argv)
             if (resource.m_ResType == Resource::ResourceType::ARE)
             {
                 Gff::Friendly::Type_CExoLocString name;
-                Gff::Friendly::Type_CResRef resref;
                 Gff::Friendly::Type_INT width, height;
                 Gff::Friendly::Type_CResRef tileset;
                 Gff::Friendly::Type_List tile_list;
 
                 gff.GetTopLevelStruct().ReadField("Name", &name);
-                gff.GetTopLevelStruct().ReadField("ResRef", &resref);
-                   gff.GetTopLevelStruct().ReadField("Width", &width);
-                   gff.GetTopLevelStruct().ReadField("Height", &height);
-                   gff.GetTopLevelStruct().ReadField("Tileset", &tileset);
-                   gff.GetTopLevelStruct().ReadField("Tile_List", &tile_list);
+                gff.GetTopLevelStruct().ReadField("Width", &width);
+                gff.GetTopLevelStruct().ReadField("Height", &height);
+                gff.GetTopLevelStruct().ReadField("Tileset", &tileset);
+                gff.GetTopLevelStruct().ReadField("Tile_List", &tile_list);
 
-                area.resref = std::string(resref.m_String, resref.m_Size);
+                area.name = name.m_SubStrings[0].m_String;
                 area.width = width;
                 area.height = height;
                 area.tileset = std::string(tileset.m_String, tileset.m_Size);
 
-                for (const Gff::Friendly::Type_Struct&  entry : tile_list.GetStructs())
+                for (const Gff::Friendly::Type_Struct& entry : tile_list.GetStructs())
                 {
                     Gff::Friendly::Type_INT id, orientation;
                     entry.ReadField("Tile_ID", &id);
@@ -292,18 +305,84 @@ int main(int argc, char** argv)
 
             else if (resource.m_ResType == Resource::ResourceType::GIT)
             {
-                // Transitions, creatures, add custom map pins...
+                auto parse_transitions = [&resource, &transitions](const Gff::Friendly::GffStruct& str)
+                {
+                    Gff::Friendly::Type_CExoString target;
+                    str.ReadField("LinkedTo", &target);
+
+                    if (target.m_String != "")
+                    {
+                        Transition trans;
+                        trans.src_area = resource.m_ResRef;
+                        trans.dst_tag = target.m_String;
+                        transitions.emplace_back(std::move(trans));
+                    }
+                };
+
+                auto parse_transition_destinations = [&resource](const Gff::Friendly::GffStruct& str,
+                    std::unordered_map<std::string, PossibleTransitionDestination>& map,
+                    const char* str_x, const char* str_y, const char* str_z)
+                {
+                    Gff::Friendly::Type_CExoString tag;
+                    str.ReadField("Tag", &tag);
+                    if (tag.m_String != "")
+                    {
+                        Gff::Friendly::Type_FLOAT x, y, z;
+                        str.ReadField(str_x, &x);
+                        str.ReadField(str_y, &y);
+                        str.ReadField(str_z, &z);
+
+                        if (!map.contains(tag.m_String))
+                        {
+                            PossibleTransitionDestination dest;
+                            dest.area = resource.m_ResRef;
+                            dest.x = x;
+                            dest.y = y;
+                            dest.z = z;
+                            map[tag.m_String] = std::move(dest);
+                        }
+                    }
+                };
+
+                Gff::Friendly::GffList doors;
+                Gff::Friendly::GffList triggers;
+                Gff::Friendly::GffList waypointList;
+
+                gff.GetTopLevelStruct().ReadField("Door List", &doors);
+                gff.GetTopLevelStruct().ReadField("TriggerList", &triggers);
+                gff.GetTopLevelStruct().ReadField("WaypointList", &waypointList);
+
+                for (const Gff::Friendly::Type_Struct& entry : doors.GetStructs())
+                {
+                    parse_transitions(entry);
+                    parse_transition_destinations(entry,
+                        transitions_dest_door,
+                        "X", "Y", "Z");
+                }
+
+                for (const Gff::Friendly::Type_Struct& entry : triggers.GetStructs())
+                {
+                    parse_transitions(entry);
+                }
+
+                for (const Gff::Friendly::Type_Struct& entry : waypointList.GetStructs())
+                {
+                    parse_transitions(entry);
+                    parse_transition_destinations(entry,
+                        transitions_dest_wp,
+                        "XPosition", "YPosition", "ZPosition");
+                }
             }
         }
     }
 
-    static auto blit = [](unsigned char* dst,
+    auto blit = [](unsigned char* dst,
         int dst_width, int dst_height,
-        int dst_target_width, int dst_target_height, 
-        int dst_target_x, int dst_target_y, 
+        int dst_target_width, int dst_target_height,
+        int dst_target_x, int dst_target_y,
         int orientation, const Tga& src)
     {
-        static auto rotate = [](int* x, int* y,
+        auto rotate = [](int* x, int* y,
             int src_x, int src_y, int src_width, int src_height, int degrees)
         {
             ASSERT(src_width % src_height == 0);
@@ -385,6 +464,86 @@ int main(int argc, char** argv)
 
         delete[] image;
     }
+
+    std::vector<std::string> javascript_output;
+
+    for (const auto& kvp : areas)
+    {
+        const std::string& resref = kvp.first;
+        const std::string& name = kvp.second.name;
+        int width = kvp.second.width;
+        int height = kvp.second.height;
+
+        char line[512];
+        std::sprintf(line, ".selector('#%s').css({label : \"%s\", width: %d, height: %d, 'background-image': 'maps/%s.png'})",
+            resref.c_str(), name.c_str(), width * 64, height * 64, resref.c_str());
+        javascript_output.emplace_back(line);
+    }
+
+    javascript_output.emplace_back("elements: {");
+    javascript_output.emplace_back("nodes: [");
+    for (const auto& kvp : areas)
+    {
+        char line[512];
+        std::sprintf(line, "{ data: { id: '%s' } },", kvp.first.c_str());
+        javascript_output.emplace_back(line);
+    }
+    javascript_output.emplace_back("]");
+
+    javascript_output.emplace_back("edges: [");
+
+    for (const Transition& trans : transitions)
+    {
+        auto lookup = [&transitions_dest_door, &transitions_dest_wp](const std::string& wp)
+            -> std::string
+        {
+            std::string ret;
+
+            if (auto iter = transitions_dest_wp.find(wp); iter == std::end(transitions_dest_wp))
+            {
+                if (iter = transitions_dest_door.find(wp); iter == std::end(transitions_dest_door))
+                {
+                    ret = "";
+                }
+                else
+                {
+                    ret = iter->second.area;
+                }
+            }
+            else
+            {
+                ret = iter->second.area;
+            }
+
+            return ret;
+        };
+
+        const std::string& dst_area = lookup(trans.dst_tag);
+
+        if (dst_area != "")
+        {
+            char line[512];
+            std::sprintf(line, "{ data: { source: '%s', target: '%s' } },",
+                trans.src_area.c_str(), dst_area.c_str());
+            javascript_output.emplace_back(line);
+        }
+    }
+
+    javascript_output.emplace_back("]");
+    javascript_output.emplace_back("},");
+
+    char out_path_js[512];
+    std::sprintf(out_path_js, "%s/_map.js", path_out);
+
+    FILE* js_file = std::fopen(out_path_js, "w");
+    ASSERT(js_file);
+
+    for (const std::string& line : javascript_output)
+    {
+        std::fprintf(js_file, "%s\n", line.c_str());
+    }
+
+    std::fclose(js_file);
 
     return 0;
 }
